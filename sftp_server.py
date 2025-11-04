@@ -156,6 +156,8 @@ class ClientTracker:
         
         with open('clients.html', 'w') as f:
             f.write(html)
+        # Set restrictive permissions on the HTML file
+        os.chmod('clients.html', 0o644)
 
 
 class SFTPServerInterface(paramiko.SFTPServerInterface):
@@ -292,7 +294,11 @@ class SSHServer(paramiko.ServerInterface):
     def check_auth_password(self, username, password):
         """Check password authentication"""
         # For demo purposes, accept any username with password 'password'
-        # In production, use proper authentication
+        # SECURITY WARNING: In production, use proper authentication:
+        # - Store hashed passwords in a database
+        # - Use SSH keys instead of passwords
+        # - Implement rate limiting and account lockout
+        # - Use environment variables for credentials
         if password == 'password':
             self.username = username
             return paramiko.AUTH_SUCCESSFUL
@@ -362,11 +368,11 @@ def handle_client(client_socket, address, host_key, client_tracker):
         if transport:
             try:
                 transport.close()
-            except:
+            except OSError:
                 pass
         try:
             client_socket.close()
-        except:
+        except OSError:
             pass
 
 
@@ -388,6 +394,11 @@ def generate_host_key():
 def main():
     """Main server function"""
     # Configuration
+    # NOTE: Binding to 0.0.0.0 allows connections from any network interface.
+    # This is intentional for a server application. In production:
+    # - Consider binding to a specific interface if not needed publicly
+    # - Use firewall rules to restrict access
+    # - Implement IP whitelisting if appropriate
     HOST = '0.0.0.0'
     PORT = 2222
     
