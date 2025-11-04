@@ -210,21 +210,35 @@ class SFTPServerInterface(paramiko.SFTPServerInterface):
             # Create parent directories if needed
             os.makedirs(os.path.dirname(real_path), exist_ok=True)
             
-            mode = 'r'
+            # Determine file mode based on flags
+            mode = ''
             if (flags & os.O_WRONLY):
-                mode = 'w'
+                if (flags & os.O_APPEND):
+                    mode = 'ab'
+                else:
+                    mode = 'wb'
             elif (flags & os.O_RDWR):
-                mode = 'r+'
-            if (flags & os.O_APPEND):
-                mode = 'a'
+                if (flags & os.O_APPEND):
+                    mode = 'a+b'
+                else:
+                    mode = 'r+b'
+            else:
+                mode = 'rb'
             
-            binary_flag = 'b' if flags & os.O_BINARY else ''
-            f = open(real_path, mode + binary_flag)
+            # Try to open the file
+            if (flags & os.O_CREAT) and not os.path.exists(real_path):
+                # Create the file if it doesn't exist
+                f = open(real_path, 'wb')
+                f.close()
+            
+            f = open(real_path, mode)
             fobj = paramiko.SFTPHandle(flags)
             fobj.filename = real_path
             fobj.readfile = f
             fobj.writefile = f
             return fobj
+        except IOError as e:
+            return paramiko.SFTP_PERMISSION_DENIED
         except Exception as e:
             return paramiko.SFTP_FAILURE
     
@@ -304,22 +318,24 @@ class SSHServer(paramiko.ServerInterface):
 def handle_client(client_socket, address, host_key, client_tracker):
     """Handle individual client connection"""
     client_id = f"{address[0]}:{address[1]}"
+    transport = None
     
     try:
         # Create SSH transport
         transport = paramiko.Transport(client_socket)
         transport.add_server_key(host_key)
-        transport.set_subsystem_handler('sftp', paramiko.SFTPServer, SFTPServerInterface)
         
         # Set up the SSH server
         username = 'unknown'
         server = SSHServer(client_tracker, client_id, address[0], username)
+        
+        # Start server - this will handle authentication
         transport.start_server(server=server)
         
-        # Wait for authentication and channel
+        # Wait for client to request a channel
         channel = transport.accept(20)
         if channel is None:
-            print(f"[-] Client {client_id} failed to open channel")
+            print(f"[-] Client {client_id} - no channel opened")
             return
         
         # Get authenticated username
@@ -329,18 +345,25 @@ def handle_client(client_socket, address, host_key, client_tracker):
         client_tracker.add_client(client_id, address[0], username)
         print(f"[+] Client connected: {client_id} ({username})")
         
-        # Wait for the client to disconnect
-        while transport.is_active():
-            if channel.closed:
-                break
-            import time
-            time.sleep(0.5)
+        # Start SFTP server on this channel
+        sftp_server = paramiko.SFTPServer(channel, 'sftp', server, SFTPServerInterface)
+        sftp_server.start()
+        
+        # Wait for the SFTP server to finish (client disconnects)
+        sftp_server.join()
         
     except Exception as e:
         print(f"[-] Error handling client {client_id}: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         client_tracker.remove_client(client_id)
         print(f"[-] Client disconnected: {client_id}")
+        if transport:
+            try:
+                transport.close()
+            except:
+                pass
         try:
             client_socket.close()
         except:
