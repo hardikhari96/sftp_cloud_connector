@@ -108,9 +108,13 @@ def create_user(payload: UserCreate, admin: Dict = Depends(require_admin)) -> Us
 
 
 @app.patch("/users/{user_id}", response_model=UserResponse)
-def update_user(user_id: str, payload: UserUpdate, _: Dict = Depends(require_admin)) -> UserResponse:
+def update_user(user_id: str, payload: UserUpdate, admin: Dict = Depends(require_admin)) -> UserResponse:
+    # Prevent admin from deactivating themselves
+    if str(admin["_id"]) == user_id and payload.is_active is False:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot deactivate your own account")
+    
     try:
-        user = user_service.update_user(user_id, payload.password, payload.is_active, payload.home_dir)
+        user = user_service.update_user(user_id, payload.password, payload.is_active, payload.home_dir, payload.role)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     if not user:
@@ -121,16 +125,18 @@ def update_user(user_id: str, payload: UserUpdate, _: Dict = Depends(require_adm
 
 
 @app.get("/connections", response_model=List[ConnectionResponse])
-def list_connections(user_id: Optional[str] = None, _: Dict = Depends(require_admin)) -> List[ConnectionResponse]:
-    connections = connection_service.list_connections(user_id)
+def list_connections(user_id: Optional[str] = None, limit: int = 100, _: Dict = Depends(require_admin)) -> List[ConnectionResponse]:
+    connections = connection_service.list_connections(user_id, limit)
     for conn in connections:
         conn["_id"] = str(conn["_id"])
     return connections
 
 
 @app.get("/analytics", response_model=ConnectionsSummary)
-def analytics(_: Dict = Depends(require_admin)) -> ConnectionsSummary:
-    summary = connection_service.summaries()
+def analytics(current_user: Dict = Depends(get_current_user)) -> ConnectionsSummary:
+    # Admin users see all analytics, regular users see only their own
+    user_id_filter = None if current_user.get("role") == "admin" else str(current_user["_id"])
+    summary = connection_service.summaries(user_id_filter)
     transfers = [
         AnalyticsResponse(
             username=item.get("_id", "unknown"),
@@ -155,3 +161,20 @@ def list_my_connections(current_user: Dict = Depends(get_current_user)) -> List[
     for conn in connections:
         conn["_id"] = str(conn["_id"])
     return connections
+
+
+@app.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_user(user_id: str, admin: Dict = Depends(require_admin)) -> None:
+    # Prevent admin from deleting themselves
+    if str(admin["_id"]) == user_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot delete your own account")
+    
+    if not user_service.delete_user(user_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+
+@app.get("/me", response_model=UserResponse)
+def get_current_user_info(current_user: Dict = Depends(get_current_user)) -> UserResponse:
+    current_user["_id"] = str(current_user["_id"])
+    current_user.pop("password_hash", None)
+    return current_user

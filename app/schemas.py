@@ -26,6 +26,7 @@ class UserUpdate(BaseModel):
     password: Optional[str] = None
     is_active: Optional[bool] = None
     home_dir: Optional[str] = None
+    role: Optional[str] = Field(None, pattern="^(admin|user)$")
 
 
 class UserResponse(BaseModel):

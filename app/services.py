@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -47,7 +47,7 @@ class UserService:
                 "role": "admin",
                 "is_active": True,
                 "home_dir": home_dir,
-                "created_at": datetime.utcnow(),
+                "created_at": datetime.now(timezone.utc),
                 "last_login": None,
             }
         )
@@ -67,13 +67,17 @@ class UserService:
             return None
         if not verify_password(password, user.get("password_hash", "")):
             return None
-        self.users.update_one({"_id": user["_id"]}, {"$set": {"last_login": datetime.utcnow()}})
+        self.users.update_one({"_id": user["_id"]}, {"$set": {"last_login": datetime.now(timezone.utc)}})
         return user
 
     def list_users(self) -> List[Dict]:
         return list(self.users.find())
 
     def create_user(self, username: str, password: str, role: str, home_dir: Optional[str], is_active: bool) -> Dict:
+        if len(password) < 8:
+            raise ValueError("Password must be at least 8 characters long")
+        if role not in ("admin", "user"):
+            raise ValueError("Role must be 'admin' or 'user'")
         sanitized_home = self._sanitize_home_dir(home_dir, username)
         self._ensure_home_directory(sanitized_home)
         document = {
@@ -82,22 +86,28 @@ class UserService:
             "role": role,
             "is_active": is_active,
             "home_dir": sanitized_home,
-            "created_at": datetime.utcnow(),
+            "created_at": datetime.now(timezone.utc),
             "last_login": None,
         }
         result = self.users.insert_one(document)
         document["_id"] = result.inserted_id
         return document
 
-    def update_user(self, user_id: str, password: Optional[str], is_active: Optional[bool], home_dir: Optional[str]) -> Optional[Dict]:
+    def update_user(self, user_id: str, password: Optional[str], is_active: Optional[bool], home_dir: Optional[str], role: Optional[str] = None) -> Optional[Dict]:
         user = self.get_by_id(user_id)
         if not user:
             return None
         update: Dict[str, object] = {}
         if password:
+            if len(password) < 8:
+                raise ValueError("Password must be at least 8 characters long")
             update["password_hash"] = hash_password(password)
         if is_active is not None:
             update["is_active"] = is_active
+        if role is not None:
+            if role not in ("admin", "user"):
+                raise ValueError("Role must be 'admin' or 'user'")
+            update["role"] = role
         if home_dir:
             sanitized = self._sanitize_home_dir(home_dir, user.get("home_dir") or user.get("username") or "")
             self._ensure_home_directory(sanitized)
@@ -107,6 +117,13 @@ class UserService:
         self.users.update_one({"_id": ObjectId(user_id)}, {"$set": update})
         user.update(update)
         return user
+
+    def delete_user(self, user_id: str) -> bool:
+        try:
+            result = self.users.delete_one({"_id": ObjectId(user_id)})
+            return result.deleted_count > 0
+        except Exception:
+            return False
 
 
 class ConnectionService:
@@ -124,7 +141,7 @@ class ConnectionService:
             "username": user["username"],
             "client_id": client_id,
             "remote_ip": remote_ip,
-            "started_at": datetime.utcnow(),
+            "started_at": datetime.now(timezone.utc),
             "active": True,
             "bytes_uploaded": 0,
             "bytes_downloaded": 0,
@@ -135,7 +152,7 @@ class ConnectionService:
     def end_connection(self, connection_id: ObjectId, bytes_uploaded: int, bytes_downloaded: int, transfers: List[Dict]) -> None:
         update = {
             "$set": {
-                "ended_at": datetime.utcnow(),
+                "ended_at": datetime.now(timezone.utc),
                 "active": False,
                 "bytes_uploaded": bytes_uploaded,
                 "bytes_downloaded": bytes_downloaded,
@@ -145,7 +162,7 @@ class ConnectionService:
         if transfers:
             for transfer in transfers:
                 transfer["connection_id"] = str(connection_id)
-                transfer.setdefault("timestamp", datetime.utcnow())
+                transfer.setdefault("timestamp", datetime.now(timezone.utc))
             self.transfers.insert_many(transfers)
 
     def record_transfer(self, connection_id: ObjectId, username: str, path: str, direction: str, size: int) -> None:
@@ -155,7 +172,7 @@ class ConnectionService:
             "path": path,
             "direction": direction,
             "size": size,
-            "timestamp": datetime.utcnow(),
+            "timestamp": datetime.now(timezone.utc),
         }
         self.transfers.insert_one(document)
         if direction == "upload":
@@ -163,35 +180,52 @@ class ConnectionService:
         else:
             self.connections.update_one({"_id": connection_id}, {"$inc": {"bytes_downloaded": size}})
 
-    def list_connections(self, user_id: Optional[str] = None) -> List[Dict]:
+    def list_connections(self, user_id: Optional[str] = None, limit: int = 100) -> List[Dict]:
         filter_query: Dict[str, object] = {}
         if user_id:
             filter_query["user_id"] = user_id
-        return list(self.connections.find(filter_query).sort("started_at", -1))
+        return list(self.connections.find(filter_query).sort("started_at", -1).limit(limit))
 
-    def summaries(self) -> Dict[str, object]:
-        pipeline = [
-            {
-                "$group": {
-                    "_id": "$username",
-                    "total_upload": {"$sum": "$bytes_uploaded"},
-                    "total_download": {"$sum": "$bytes_downloaded"},
-                    "session_count": {"$sum": 1},
-                }
+    def summaries(self, user_id: Optional[str] = None) -> Dict[str, object]:
+        match_stage = {}
+        if user_id:
+            match_stage = {"$match": {"user_id": user_id}}
+        
+        pipeline = []
+        if match_stage:
+            pipeline.append(match_stage)
+        
+        pipeline.append({
+            "$group": {
+                "_id": "$username",
+                "total_upload": {"$sum": "$bytes_uploaded"},
+                "total_download": {"$sum": "$bytes_downloaded"},
+                "session_count": {"$sum": 1},
             }
-        ]
+        })
+        
         summary = list(self.connections.aggregate(pipeline))
+        
+        # Build transfer counts pipeline with optional filter
+        transfer_pipeline = []
+        if user_id:
+            transfer_pipeline.append({"$match": {"user_id": user_id}})
+        transfer_pipeline.append({"$group": {"_id": "$username", "count": {"$sum": 1}}})
+        
         transfer_counts = {
             item["_id"]: item["count"]
-            for item in self.transfers.aggregate([
-                {"$group": {"_id": "$username", "count": {"$sum": 1}}}
-            ])
+            for item in self.transfers.aggregate(transfer_pipeline)
         }
+        
         for item in summary:
             item["transfer_count"] = transfer_counts.get(item.get("_id"), 0)
+        
+        # Apply filter to document counts as well
+        filter_query = {"user_id": user_id} if user_id else {}
+        
         return {
-            "total_connections": self.connections.count_documents({}),
-            "active_connections": self.connections.count_documents({"active": True}),
+            "total_connections": self.connections.count_documents(filter_query),
+            "active_connections": self.connections.count_documents({**filter_query, "active": True}),
             "total_upload": sum(item.get("total_upload", 0) for item in summary),
             "total_download": sum(item.get("total_download", 0) for item in summary),
             "transfers": summary,

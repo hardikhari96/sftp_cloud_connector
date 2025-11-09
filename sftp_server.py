@@ -9,7 +9,7 @@ import os
 import socket
 import sys
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
@@ -54,7 +54,7 @@ class ClientTracker:
             self.clients[client_id] = {
                 'address': address,
                 'username': username,
-                'connected_at': datetime.now(),
+                'connected_at': datetime.now(timezone.utc),
                 'status': 'connected'
             }
             self.generate_html()
@@ -64,7 +64,7 @@ class ClientTracker:
         with self.lock:
             if client_id in self.clients:
                 self.clients[client_id]['status'] = 'disconnected'
-                self.clients[client_id]['disconnected_at'] = datetime.now()
+                self.clients[client_id]['disconnected_at'] = datetime.now(timezone.utc)
             self.generate_html()
     
     def generate_html(self):
@@ -285,7 +285,7 @@ class SFTPServerInterface(paramiko.SFTPServerInterface):
             'direction': direction,
             'size': size,
             'username': self.username,
-            'timestamp': datetime.utcnow(),
+            'timestamp': datetime.now(timezone.utc),
         }
         if self.user_doc.get('_id') is not None:
             record['user_id'] = str(self.user_doc['_id'])

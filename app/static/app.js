@@ -11,8 +11,42 @@ const summaryEl = document.getElementById("summary");
 const toast = document.getElementById("toast");
 const connectionsFilter = document.getElementById("connections-filter");
 const refreshConnectionsBtn = document.getElementById("refresh-connections");
-const usersCard = document.getElementById("users-card");
-const createUserCard = document.getElementById("create-user-card");
+const userSearchInput = document.getElementById("user-search");
+
+let allUsers = [];
+
+// Tab switching functionality
+function switchTab(tabName) {
+    // Update tab buttons
+    const tabButtons = document.querySelectorAll(".tab-btn");
+    tabButtons.forEach(btn => {
+        if (btn.dataset.tab === tabName) {
+            btn.classList.add("active");
+        } else {
+            btn.classList.remove("active");
+        }
+    });
+    
+    // Update tab contents
+    const tabContents = document.querySelectorAll(".tab-content");
+    tabContents.forEach(content => {
+        if (content.id === `${tabName}-tab`) {
+            content.classList.add("active");
+        } else {
+            content.classList.remove("active");
+        }
+    });
+}
+
+// Initialize tab handlers
+function initializeTabs() {
+    const tabButtons = document.querySelectorAll(".tab-btn");
+    tabButtons.forEach(btn => {
+        btn.addEventListener("click", () => {
+            switchTab(btn.dataset.tab);
+        });
+    });
+}
 
 class ApiError extends Error {
     constructor(message, status) {
@@ -96,7 +130,17 @@ function formatDate(value) {
 
 function formatBytes(value) {
     if (!value && value !== 0) return "-";
-    return value.toLocaleString();
+    
+    const bytes = Number(value);
+    if (isNaN(bytes)) return value;
+    
+    if (bytes === 0) return "0 Bytes";
+    
+    const k = 1024;
+    const sizes = ["Bytes", "KB", "MB", "GB", "TB"];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
 }
 
 function renderUsers(users) {
@@ -107,18 +151,25 @@ function renderUsers(users) {
     }
     for (const user of users) {
         const tr = document.createElement("tr");
+        const isCurrentUser = user.username === currentUser;
         tr.innerHTML = `
-            <td>${user.username}</td>
-            <td>${user.role}</td>
+            <td>${user.username}${isCurrentUser ? ' <strong>(You)</strong>' : ''}</td>
+            <td>
+                <select data-action="change-role" data-id="${user._id}" data-current="${user.role}" ${isCurrentUser ? 'disabled' : ''}>
+                    <option value="user" ${user.role === 'user' ? 'selected' : ''}>User</option>
+                    <option value="admin" ${user.role === 'admin' ? 'selected' : ''}>Admin</option>
+                </select>
+            </td>
             <td>${user.home_dir}</td>
             <td>${user.is_active ? "Active" : "Inactive"}</td>
             <td>${formatDate(user.created_at)}</td>
             <td>${formatDate(user.last_login)}</td>
             <td class="actions">
-                <button data-action="toggle" data-id="${user._id}" data-active="${user.is_active}">
+                <button data-action="toggle" data-id="${user._id}" data-active="${user.is_active}" ${isCurrentUser ? 'disabled' : ''}>
                     ${user.is_active ? "Deactivate" : "Activate"}
                 </button>
                 <button data-action="password" data-id="${user._id}">Reset Password</button>
+                <button data-action="delete" data-id="${user._id}" ${isCurrentUser ? 'disabled' : ''}>Delete</button>
             </td>
         `;
         usersTableBody.appendChild(tr);
@@ -149,7 +200,26 @@ function renderConnections(connections) {
 }
 
 function renderAnalytics(summary) {
-    summaryEl.textContent = `Total Connections: ${summary.total_connections} | Active: ${summary.active_connections} | Upload: ${formatBytes(summary.total_upload)} | Download: ${formatBytes(summary.total_download)}`;
+    // Render stats cards
+    summaryEl.innerHTML = `
+        <div class="stat-card connection-card">
+            <div class="stat-label">Total Connections</div>
+            <div class="stat-value">${summary.total_connections}</div>
+        </div>
+        <div class="stat-card connection-card">
+            <div class="stat-label">Active Now</div>
+            <div class="stat-value">${summary.active_connections}</div>
+        </div>
+        <div class="stat-card upload-card">
+            <div class="stat-label">Total Upload</div>
+            <div class="stat-value">${formatBytes(summary.total_upload)}</div>
+        </div>
+        <div class="stat-card download-card">
+            <div class="stat-label">Total Download</div>
+            <div class="stat-value">${formatBytes(summary.total_download)}</div>
+        </div>
+    `;
+    
     analyticsTableBody.innerHTML = "";
     if (!summary.transfers.length) {
         analyticsTableBody.innerHTML = '<tr><td colspan="4">No analytics yet</td></tr>';
@@ -158,7 +228,7 @@ function renderAnalytics(summary) {
     for (const item of summary.transfers) {
         const tr = document.createElement("tr");
         tr.innerHTML = `
-            <td>${item.username}</td>
+            <td><strong>${item.username}</strong></td>
             <td>${formatBytes(item.total_upload)}</td>
             <td>${formatBytes(item.total_download)}</td>
             <td>${item.transfer_count}</td>
@@ -170,16 +240,40 @@ function renderAnalytics(summary) {
 async function loadUsers() {
     try {
         const data = await apiFetch("/users");
-        usersCard?.classList.remove("hidden");
-        createUserCard?.classList.remove("hidden");
+        allUsers = data;
         renderUsers(data);
     } catch (error) {
         if (error instanceof ApiError && error.status === 403) {
-            usersCard?.classList.add("hidden");
-            createUserCard?.classList.add("hidden");
+            // Hide create user tab if not admin
+            const createUserTab = document.querySelector('[data-tab="create-user"]');
+            if (createUserTab) {
+                createUserTab.style.display = 'none';
+            }
             return;
         }
         showToast(error.message, "error");
+    }
+}
+
+function filterUsers(searchTerm) {
+    const term = searchTerm.toLowerCase().trim();
+    if (!term) {
+        return allUsers;
+    }
+    return allUsers.filter(user => 
+        user.username.toLowerCase().includes(term) || 
+        user.role.toLowerCase().includes(term) ||
+        user.home_dir.toLowerCase().includes(term)
+    );
+}
+
+function setLoading(element, isLoading) {
+    if (isLoading) {
+        element.classList.add("loading");
+        element.disabled = true;
+    } else {
+        element.classList.remove("loading");
+        element.disabled = false;
     }
 }
 
@@ -240,13 +334,23 @@ logoutBtn.addEventListener("click", () => {
 
 createUserForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const submitBtn = event.target.querySelector('button[type="submit"]');
+    const password = document.getElementById("new-password").value;
+    
+    if (password.length < 8) {
+        showToast("Password must be at least 8 characters", "error");
+        return;
+    }
+    
     const payload = {
         username: document.getElementById("new-username").value.trim(),
-        password: document.getElementById("new-password").value,
+        password: password,
         role: document.getElementById("new-role").value,
         home_dir: document.getElementById("new-home").value.trim() || null,
         is_active: document.getElementById("new-active").checked,
     };
+    
+    setLoading(submitBtn, true);
     try {
         await apiFetch("/users", {
             method: "POST",
@@ -254,10 +358,12 @@ createUserForm.addEventListener("submit", async (event) => {
         });
         createUserForm.reset();
         document.getElementById("new-active").checked = true;
-        showToast("User created", "success");
+        showToast("User created successfully", "success");
         await loadUsers();
     } catch (error) {
         showToast(error.message, "error");
+    } finally {
+        setLoading(submitBtn, false);
     }
 });
 
@@ -269,6 +375,10 @@ usersTableBody.addEventListener("click", async (event) => {
 
     if (action === "toggle") {
         const isActive = button.dataset.active === "true";
+        const confirmMsg = `Are you sure you want to ${isActive ? "deactivate" : "activate"} this user?`;
+        if (!confirm(confirmMsg)) return;
+        
+        setLoading(button, true);
         try {
             await apiFetch(`/users/${id}`, {
                 method: "PATCH",
@@ -278,28 +388,94 @@ usersTableBody.addEventListener("click", async (event) => {
             await loadUsers();
         } catch (error) {
             showToast(error.message, "error");
+        } finally {
+            setLoading(button, false);
         }
     }
 
     if (action === "password") {
-        const newPassword = prompt("Enter new password");
+        const newPassword = prompt("Enter new password (min 8 characters):");
         if (!newPassword) return;
+        if (newPassword.length < 8) {
+            showToast("Password must be at least 8 characters", "error");
+            return;
+        }
+        
+        setLoading(button, true);
         try {
             await apiFetch(`/users/${id}`, {
                 method: "PATCH",
                 body: JSON.stringify({ password: newPassword }),
             });
-            showToast("Password reset", "success");
+            showToast("Password reset successfully", "success");
         } catch (error) {
             showToast(error.message, "error");
+        } finally {
+            setLoading(button, false);
         }
+    }
+
+    if (action === "delete") {
+        const confirmMsg = "Are you sure you want to DELETE this user? This action cannot be undone.";
+        if (!confirm(confirmMsg)) return;
+        
+        setLoading(button, true);
+        try {
+            await apiFetch(`/users/${id}`, {
+                method: "DELETE",
+            });
+            showToast("User deleted successfully", "success");
+            await loadUsers();
+        } catch (error) {
+            showToast(error.message, "error");
+        } finally {
+            setLoading(button, false);
+        }
+    }
+});
+
+usersTableBody.addEventListener("change", async (event) => {
+    const select = event.target.closest("select[data-action='change-role']");
+    if (!select) return;
+    
+    const { id, current } = select.dataset;
+    const newRole = select.value;
+    
+    if (newRole === current) return;
+    
+    const confirmMsg = `Are you sure you want to change this user's role to ${newRole}?`;
+    if (!confirm(confirmMsg)) {
+        select.value = current;
+        return;
+    }
+    
+    setLoading(select, true);
+    try {
+        await apiFetch(`/users/${id}`, {
+            method: "PATCH",
+            body: JSON.stringify({ role: newRole }),
+        });
+        showToast("Role updated successfully", "success");
+        await loadUsers();
+    } catch (error) {
+        showToast(error.message, "error");
+        select.value = current;
+    } finally {
+        setLoading(select, false);
     }
 });
 
 refreshConnectionsBtn.addEventListener("click", loadConnections);
 
+if (userSearchInput) {
+    userSearchInput.addEventListener("input", (event) => {
+        const filtered = filterUsers(event.target.value);
+        renderUsers(filtered);
+    });
+}
+
 document.addEventListener("click", (event) => {
-    const button = event.target.closest(".toggle-password");
+    const button = event.target.closest(".toggle-password, .toggle-password-inline");
     if (!button) {
         return;
     }
@@ -313,20 +489,30 @@ document.addEventListener("click", (event) => {
     }
     const isHidden = input.type === "password";
     input.type = isHidden ? "text" : "password";
-    button.textContent = isHidden ? "Hide" : "Show";
+    
+    // Update button text for regular toggle buttons
+    if (button.classList.contains("toggle-password")) {
+        button.textContent = isHidden ? "Hide" : "Show";
+    } else if (button.classList.contains("toggle-password-inline")) {
+        // For inline buttons, just use emoji
+        button.textContent = isHidden ? "🔒" : "👁️";
+    }
+    
     if (input.hasAttribute("readonly")) {
         input.blur();
     }
 });
 
 async function init() {
+    // Initialize tab handlers
+    initializeTabs();
+    
     if (token) {
         try {
-            const payload = await apiFetch("/me/connections");
-            setAuthState(true, currentUser || "admin");
-            renderConnections(payload);
-            await loadUsers();
-            await loadAnalytics();
+            const me = await apiFetch("/me");
+            currentUser = me.username;
+            setAuthState(true, currentUser);
+            await loadDashboard();
         } catch (error) {
             console.warn("Stored token invalid", error);
             localStorage.removeItem("sftp_token");

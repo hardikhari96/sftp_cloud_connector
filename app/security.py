@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict
 
 import bcrypt
@@ -18,7 +18,7 @@ def verify_password(password: str, password_hash: str) -> bool:
     """Validate a plaintext password against a stored hash."""
     try:
         return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
-    except ValueError:
+    except (ValueError, AttributeError):
         return False
 
 
@@ -26,8 +26,8 @@ def create_access_token(data: Dict[str, Any], expires_delta: timedelta | None = 
     """Create a signed JWT for API authentication."""
     settings = get_settings()
     to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(hours=settings.jwt_exp_hours))
-    to_encode.update({"exp": expire})
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(hours=settings.jwt_exp_hours))
+    to_encode.update({"exp": expire, "iat": datetime.now(timezone.utc)})
     return jwt.encode(to_encode, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
