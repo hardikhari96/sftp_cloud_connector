@@ -80,13 +80,15 @@ function setAuthState(isAuthenticated, username = "") {
         if (username) {
             localStorage.setItem("sftp_username", username);
         }
-        statusEl.textContent = `Logged in as ${username}`;
+        statusEl.textContent = `${username}`;
+        statusEl.classList.remove("hidden");
         loginSection.classList.add("hidden");
         dashboardSection.classList.remove("hidden");
         logoutBtn.classList.remove("hidden");
     } else {
         currentUser = "";
         statusEl.textContent = "Not authenticated";
+        statusEl.classList.add("hidden");
         loginSection.classList.remove("hidden");
         dashboardSection.classList.add("hidden");
         logoutBtn.classList.add("hidden");
