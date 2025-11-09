@@ -38,3 +38,4 @@ sftp_root/
 # OS
 .DS_Store
 Thumbs.db
+.env

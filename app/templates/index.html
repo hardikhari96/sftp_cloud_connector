@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SFTP Cloud Connector Admin</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+    <header>
+        <h1>SFTP Cloud Connector Admin Console</h1>
+        <div id="status" class="status">Not authenticated</div>
+        <button id="logout-btn" class="hidden">Logout</button>
+    </header>
+
+    <main>
+        <section id="login-section">
+            <h2>Admin Login</h2>
+            <form id="login-form">
+                <label>
+                    Username
+                    <input type="text" id="login-username" required />
+                </label>
+                <label class="password-field">
+                    Password
+                    <div class="password-input">
+                        <input type="password" id="login-password" required />
+                        <button type="button" class="toggle-password" data-target="login-password">Show</button>
+                    </div>
+                </label>
+                <button type="submit">Sign In</button>
+            </form>
+        </section>
+
+        <section id="dashboard" class="hidden">
+            <section class="card" id="connection-card">
+                <h2>Connection Details</h2>
+                <div class="details-grid">
+                    <div>
+                        <span class="label">Server Host</span>
+                        <span class="value" id="conn-host">{{ connection_details.host or "" }}</span>
+                    </div>
+                    <div>
+                        <span class="label">SFTP Port</span>
+                        <span class="value" id="conn-port">{{ connection_details.port or "" }}</span>
+                    </div>
+                    <div>
+                        <span class="label">Admin Username</span>
+                        <span class="value" id="conn-admin-user">{{ connection_details.default_username or "" }}</span>
+                    </div>
+                </div>
+                <div class="password-display">
+                    <span class="label">Admin Default Password</span>
+                    <div class="password-input">
+                        <input type="password" id="default-password" value="{{ connection_details.default_password or "" }}" readonly />
+                        <button type="button" class="toggle-password" data-target="default-password">Show</button>
+                    </div>
+                    <p class="hint">Change this password in your configuration after first login.</p>
+                </div>
+            </section>
+
+            <section class="card" id="create-user-card">
+                <h2>Create User</h2>
+                <form id="create-user-form">
+                    <div class="form-grid">
+                        <label>
+                            Username
+                            <input type="text" id="new-username" required />
+                        </label>
+                        <label class="password-field">
+                            Password
+                            <div class="password-input">
+                                <input type="password" id="new-password" required />
+                                <button type="button" class="toggle-password" data-target="new-password">Show</button>
+                            </div>
+                        </label>
+                        <label>
+                            Role
+                            <select id="new-role">
+                                <option value="user">User</option>
+                                <option value="admin">Admin</option>
+                            </select>
+                        </label>
+                        <label>
+                            Home Directory (optional)
+                            <input type="text" id="new-home" placeholder="defaults to username" />
+                        </label>
+                        <label class="checkbox">
+                            <input type="checkbox" id="new-active" checked /> Active
+                        </label>
+                    </div>
+                    <button type="submit">Create User</button>
+                </form>
+            </section>
+
+            <section class="card" id="users-card">
+                <h2>Users</h2>
+                <table id="users-table">
+                    <thead>
+                        <tr>
+                            <th>Username</th>
+                            <th>Role</th>
+                            <th>Home</th>
+                            <th>Active</th>
+                            <th>Created</th>
+                            <th>Last Login</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </section>
+
+            <section class="card" id="connections-card">
+                <h2>Connections</h2>
+                <div class="controls">
+                    <label>
+                        Filter by User ID
+                        <input type="text" id="connections-filter" placeholder="Optional user id" />
+                    </label>
+                    <button id="refresh-connections">Refresh</button>
+                </div>
+                <table id="connections-table">
+                    <thead>
+                        <tr>
+                            <th>User</th>
+                            <th>Client ID</th>
+                            <th>Remote IP</th>
+                            <th>Started</th>
+                            <th>Ended</th>
+                            <th>Uploaded</th>
+                            <th>Downloaded</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </section>
+
+            <section class="card" id="analytics-card">
+                <h2>Analytics</h2>
+                <div id="summary"></div>
+                <table id="analytics-table">
+                    <thead>
+                        <tr>
+                            <th>Username</th>
+                            <th>Total Upload (bytes)</th>
+                            <th>Total Download (bytes)</th>
+                            <th>Transfers</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </section>
+        </section>
+    </main>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <script src="/static/app.js" type="module"></script>
+</body>
+</html>

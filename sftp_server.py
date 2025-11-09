@@ -9,16 +9,36 @@ import os
 import socket
 import sys
 import threading
-import paramiko
 from datetime import datetime
 from pathlib import Path
+from typing import Dict, List
+
+import paramiko
+
+from app.config import get_settings
+from app.db import get_database
+from app.services import ConnectionService, UserService
 
 
 # Define base directory for all file paths
 BASE_DIR = Path(__file__).resolve().parent
 CLIENTS_HTML = BASE_DIR / 'clients.html'
 HOST_KEY_FILE = BASE_DIR / 'host_key.pem'
-SFTP_ROOT = BASE_DIR / 'sftp_root'
+
+
+try:
+    settings = get_settings()
+except Exception as exc:  # noqa: BLE001
+    print(f"[!] Configuration error: {exc}")
+    sys.exit(1)
+
+SFTP_ROOT = settings.sftp_root.resolve()
+SFTP_ROOT.mkdir(parents=True, exist_ok=True)
+
+db = get_database()
+user_service = UserService(db)
+connection_service = ConnectionService(db)
+user_service.ensure_default_admin()
 
 
 class ClientTracker:
@@ -171,16 +191,56 @@ class ClientTracker:
 
 
 class SFTPServerInterface(paramiko.SFTPServerInterface):
-    """SFTP Server Interface Implementation"""
-    
+    """SFTP Server Interface tied to a specific authenticated user."""
+
+    class _CountingIO:
+        """Wrap a file object to record transfer metrics."""
+
+        def __init__(self, wrapped, interface: 'SFTPServerInterface', path: str):
+            self._wrapped = wrapped
+            self._interface = interface
+            self._path = path
+
+        def read(self, size=-1):  # noqa: ANN001
+            data = self._wrapped.read(size)
+            if data:
+                self._interface._record_transfer('download', self._path, len(data))
+            return data
+
+        def write(self, data):  # noqa: ANN001
+            written = self._wrapped.write(data)
+            if written:
+                size = written if isinstance(written, int) else len(data)
+                self._interface._record_transfer('upload', self._path, size)
+            return written
+
+        def close(self):
+            return self._wrapped.close()
+
+        def __getattr__(self, item):
+            return getattr(self._wrapped, item)
+
     def __init__(self, server, *args, **kwargs):
         super().__init__(server, *args, **kwargs)
-        # Keep everything rooted under the published SFTP directory
-        self.server_root = SFTP_ROOT.resolve()
-        self.server_root.mkdir(parents=True, exist_ok=True)
-    
+        self.server_iface = server
+        self.user_doc = server.user_doc or {}
+        self.username = self.user_doc.get('username', 'unknown')
+        self.global_root = SFTP_ROOT
+        home_dir = self.user_doc.get('home_dir') or self.username
+        self.user_root = self._compute_user_root(home_dir)
+        self.user_root.mkdir(parents=True, exist_ok=True)
+        server.transfer_totals = {'upload': 0, 'download': 0}
+        server.transfer_log = []
+
+    def _compute_user_root(self, home_dir: str) -> Path:
+        candidate = Path(home_dir.strip().replace('\\', '/'))
+        safe_parts = [segment for segment in candidate.parts if segment not in ('', '.', '..')]
+        safe_path = Path(*safe_parts) if safe_parts else Path(self.username)
+        resolved = (self.global_root / safe_path).resolve()
+        resolved.relative_to(self.global_root)
+        return resolved
+
     def _normalize_posix(self, path):
-        """Return a canonical POSIX path string rooted at '/'"""
         if not path or path == '.':
             return '/'
         path = str(path).replace('\\', '/')
@@ -190,7 +250,7 @@ class SFTPServerInterface(paramiko.SFTPServerInterface):
             path = '/' + path
         parts = []
         for part in path.split('/'):
-            if not part or part == '.':
+            if part in ('', '.'):  # skip empty
                 continue
             if part == '..':
                 if parts:
@@ -198,33 +258,45 @@ class SFTPServerInterface(paramiko.SFTPServerInterface):
                 continue
             parts.append(part)
         return '/' + '/'.join(parts) if parts else '/'
-    
+
     def _resolve_local_path(self, path):
-        """Map an SFTP path to a local filesystem path within server_root"""
         normalized = self._normalize_posix(path)
         rel_path = normalized.strip('/')
-        local_path = (self.server_root / rel_path).resolve()
+        local_path = (self.user_root / rel_path).resolve()
         try:
-            local_path.relative_to(self.server_root)
-        except ValueError as exc:
+            local_path.relative_to(self.user_root)
+        except ValueError as exc:  # noqa: BLE001
             raise PermissionError(f"Path escapes root: {path}") from exc
         return normalized, local_path
 
     def _stat_attributes(self, local_path, *, follow_symlinks=True):
-        """Build Paramiko stat attributes for a filesystem path"""
         stat_fn = os.stat if follow_symlinks else os.lstat
         try:
             stat_result = stat_fn(local_path)
         except OSError:
             return paramiko.SFTP_NO_SUCH_FILE
         return paramiko.SFTPAttributes.from_stat(stat_result)
-    
+
+    def _record_transfer(self, direction: str, path: str, size: int) -> None:
+        if size <= 0:
+            return
+        record = {
+            'path': path,
+            'direction': direction,
+            'size': size,
+            'username': self.username,
+            'timestamp': datetime.utcnow(),
+        }
+        if self.user_doc.get('_id') is not None:
+            record['user_id'] = str(self.user_doc['_id'])
+        self.server_iface.transfer_log.append(record)
+        totals = self.server_iface.transfer_totals
+        totals[direction] = totals.get(direction, 0) + size
+
     def canonicalize(self, path):
-        """Return the canonical form of a path"""
         return self._normalize_posix(path)
-    
+
     def list_folder(self, path):
-        """List directory contents"""
         try:
             _, local_path = self._resolve_local_path(path)
         except PermissionError:
@@ -241,62 +313,49 @@ class SFTPServerInterface(paramiko.SFTPServerInterface):
         except OSError:
             return paramiko.SFTP_FAILURE
         return entries
-    
+
     def stat(self, path):
-        """Get file/directory stats"""
         try:
             _, local_path = self._resolve_local_path(path)
         except PermissionError:
             return paramiko.SFTP_PERMISSION_DENIED
         return self._stat_attributes(local_path)
-    
+
     def lstat(self, path):
-        """Get file/directory stats (don't follow symlinks)"""
         try:
             _, local_path = self._resolve_local_path(path)
         except PermissionError:
             return paramiko.SFTP_PERMISSION_DENIED
         return self._stat_attributes(local_path, follow_symlinks=False)
-    
-    def open(self, path, flags, attr):
-        """Open a file"""
+
+    def open(self, path, flags, attr):  # noqa: ANN001, ARG002
         try:
-            _, local_path = self._resolve_local_path(path)
+            normalized, local_path = self._resolve_local_path(path)
         except PermissionError:
             return paramiko.SFTP_PERMISSION_DENIED
         try:
-            # Create parent directories if needed
             local_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Determine file mode based on flags
             mode = ''
-            if (flags & os.O_WRONLY):
-                if (flags & os.O_APPEND):
-                    mode = 'ab'
-                else:
-                    mode = 'wb'
-            elif (flags & os.O_RDWR):
-                if (flags & os.O_APPEND):
-                    mode = 'a+b'
-                else:
-                    mode = 'r+b'
+            if flags & os.O_WRONLY:
+                mode = 'ab' if flags & os.O_APPEND else 'wb'
+            elif flags & os.O_RDWR:
+                mode = 'a+b' if flags & os.O_APPEND else 'r+b'
             else:
                 mode = 'rb'
-            
-            # Try to open the file
             if (flags & os.O_CREAT) and not local_path.exists():
-                # Create the file if it doesn't exist
                 local_path.touch()
-            
-            f = open(local_path, mode)
-            fobj = paramiko.SFTPHandle(flags)
-            fobj.filename = str(local_path)
-            fobj.readfile = f
-            fobj.writefile = f
-            return fobj
-        except IOError as e:
+            file_obj = open(local_path, mode)
+            wrapped = self._CountingIO(file_obj, self, normalized)
+            handle = paramiko.SFTPHandle(flags)
+            handle.filename = str(local_path)
+            if 'r' in mode or '+' in mode:
+                handle.readfile = wrapped
+            if any(ch in mode for ch in ('w', 'a', '+')):
+                handle.writefile = wrapped
+            return handle
+        except OSError:
             return paramiko.SFTP_PERMISSION_DENIED
-        except Exception as e:
+        except Exception:
             return paramiko.SFTP_FAILURE
     
     def remove(self, path):
@@ -369,41 +428,37 @@ class SFTPServerInterface(paramiko.SFTPServerInterface):
 
 
 class SSHServer(paramiko.ServerInterface):
-    """SSH Server Interface for authentication"""
-    
-    def __init__(self, client_tracker, client_id, address, username):
+    """SSH authentication backend backed by MongoDB."""
+
+    def __init__(self, client_tracker, client_id, address, user_service: UserService, connection_service: ConnectionService):
         self.client_tracker = client_tracker
         self.client_id = client_id
         self.address = address
-        self.username = username
-    
-    def check_auth_password(self, username, password):
-        """Check password authentication"""
-        # For demo purposes, accept any username with password 'password'
-        # SECURITY WARNING: In production, use proper authentication:
-        # - Store hashed passwords in a database
-        # - Use SSH keys instead of passwords
-        # - Implement rate limiting and account lockout
-        # - Use environment variables for credentials
-        if password == 'password':
-            self.username = username
-            return paramiko.AUTH_SUCCESSFUL
-        return paramiko.AUTH_FAILED
-    
-    def check_channel_request(self, kind, chanid):
-        """Handle channel requests"""
+        self.user_service = user_service
+        self.connection_service = connection_service
+        self.username = 'unknown'
+        self.user_doc: Dict | None = None
+        self.connection_id = None
+        self.transfer_totals = {'upload': 0, 'download': 0}
+        self.transfer_log: List[Dict] = []
+
+    def check_auth_password(self, username, password):  # noqa: ANN001
+        user = self.user_service.authenticate(username, password)
+        if not user:
+            return paramiko.AUTH_FAILED
+        self.username = user['username']
+        self.user_doc = user
+        return paramiko.AUTH_SUCCESSFUL
+
+    def check_channel_request(self, kind, chanid):  # noqa: ANN001, ARG002
         if kind == 'session':
             return paramiko.OPEN_SUCCEEDED
         return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
-    
-    def check_channel_subsystem_request(self, channel, name):
-        """Handle subsystem requests"""
-        if name == 'sftp':
-            return True
-        return False
-    
-    def get_allowed_auths(self, username):
-        """Return allowed authentication methods"""
+
+    def check_channel_subsystem_request(self, channel, name):  # noqa: ANN001, ARG002
+        return name == 'sftp'
+
+    def get_allowed_auths(self, username):  # noqa: ANN001
         return 'password'
 
 
@@ -411,6 +466,8 @@ def handle_client(client_socket, address, host_key, client_tracker):
     """Handle individual client connection"""
     client_id = f"{address[0]}:{address[1]}"
     transport = None
+    server = None
+    connection_id = None
     
     try:
         # Create SSH transport
@@ -418,8 +475,7 @@ def handle_client(client_socket, address, host_key, client_tracker):
         transport.add_server_key(host_key)
         
         # Set up the SSH server
-        username = 'unknown'
-        server = SSHServer(client_tracker, client_id, address[0], username)
+        server = SSHServer(client_tracker, client_id, address[0], user_service, connection_service)
         
         # Start server - this will handle authentication
         transport.start_server(server=server)
@@ -432,6 +488,13 @@ def handle_client(client_socket, address, host_key, client_tracker):
         
         # Get authenticated username
         username = server.username
+        if not server.user_doc:
+            print(f"[-] Authentication failed for client {client_id}")
+            return
+
+        # Record connection in the database
+        connection_id = connection_service.start_connection(server.user_doc, client_id, address[0])
+        server.connection_id = connection_id
         
         # Track the client
         client_tracker.add_client(client_id, address[0], username)
@@ -449,6 +512,13 @@ def handle_client(client_socket, address, host_key, client_tracker):
         import traceback
         traceback.print_exc()
     finally:
+        if connection_id and server is not None:
+            try:
+                totals = server.transfer_totals if hasattr(server, 'transfer_totals') else {'upload': 0, 'download': 0}
+                transfers = server.transfer_log if hasattr(server, 'transfer_log') else []
+                connection_service.end_connection(connection_id, totals.get('upload', 0), totals.get('download', 0), transfers)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[!] Failed to finalize connection record {connection_id}: {exc}")
         client_tracker.remove_client(client_id)
         print(f"[-] Client disconnected: {client_id}")
         if transport:
@@ -504,10 +574,10 @@ def main():
     server_socket.listen(5)
     
     print(f"[+] SFTP Server started on {HOST}:{PORT}")
-    print(f"[+] Username: any (use 'testuser' for example)")
-    print(f"[+] Password: password")
     print(f"[+] Client list available at: {CLIENTS_HTML}")
     print(f"[+] SFTP root directory: {SFTP_ROOT}")
+    print("[+] Manage users via the Admin API (uvicorn app.admin_api:app --reload)")
+    print(f"[+] Default admin credentials: {settings.admin_default_username} / {settings.admin_default_password}")
     print("[+] Waiting for connections...")
     
     try:
