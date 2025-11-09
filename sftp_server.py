@@ -202,16 +202,22 @@ class SFTPServerInterface(paramiko.SFTPServerInterface):
     def _resolve_local_path(self, path):
         """Map an SFTP path to a local filesystem path within server_root"""
         normalized = self._normalize_posix(path)
-        rel_parts = [p for p in normalized.strip('/').split('/') if p]
-        rel_path = Path(*rel_parts) if rel_parts else Path()
+        rel_path = normalized.strip('/')
         local_path = (self.server_root / rel_path).resolve()
         try:
-            common = os.path.commonpath([str(local_path), str(self.server_root)])
-        except ValueError:
-            raise PermissionError(f"Invalid path: {path}")
-        if common != str(self.server_root):
-            raise PermissionError(f"Path escapes root: {path}")
+            local_path.relative_to(self.server_root)
+        except ValueError as exc:
+            raise PermissionError(f"Path escapes root: {path}") from exc
         return normalized, local_path
+
+    def _stat_attributes(self, local_path, *, follow_symlinks=True):
+        """Build Paramiko stat attributes for a filesystem path"""
+        stat_fn = os.stat if follow_symlinks else os.lstat
+        try:
+            stat_result = stat_fn(local_path)
+        except OSError:
+            return paramiko.SFTP_NO_SUCH_FILE
+        return paramiko.SFTPAttributes.from_stat(stat_result)
     
     def canonicalize(self, path):
         """Return the canonical form of a path"""
@@ -221,10 +227,10 @@ class SFTPServerInterface(paramiko.SFTPServerInterface):
         """List directory contents"""
         try:
             _, local_path = self._resolve_local_path(path)
-            if not local_path.exists() or not local_path.is_dir():
-                return paramiko.SFTP_NO_SUCH_FILE
         except PermissionError:
             return paramiko.SFTP_PERMISSION_DENIED
+        if not local_path.exists() or not local_path.is_dir():
+            return paramiko.SFTP_NO_SUCH_FILE
         entries = []
         try:
             for item in sorted(local_path.iterdir(), key=lambda p: p.name.lower()):
@@ -242,11 +248,7 @@ class SFTPServerInterface(paramiko.SFTPServerInterface):
             _, local_path = self._resolve_local_path(path)
         except PermissionError:
             return paramiko.SFTP_PERMISSION_DENIED
-        real_path = str(local_path)
-        try:
-            return paramiko.SFTPAttributes.from_stat(os.stat(real_path))
-        except OSError:
-            return paramiko.SFTP_NO_SUCH_FILE
+        return self._stat_attributes(local_path)
     
     def lstat(self, path):
         """Get file/directory stats (don't follow symlinks)"""
@@ -254,11 +256,7 @@ class SFTPServerInterface(paramiko.SFTPServerInterface):
             _, local_path = self._resolve_local_path(path)
         except PermissionError:
             return paramiko.SFTP_PERMISSION_DENIED
-        real_path = str(local_path)
-        try:
-            return paramiko.SFTPAttributes.from_stat(os.lstat(real_path))
-        except OSError:
-            return paramiko.SFTP_NO_SUCH_FILE
+        return self._stat_attributes(local_path, follow_symlinks=False)
     
     def open(self, path, flags, attr):
         """Open a file"""
@@ -266,10 +264,9 @@ class SFTPServerInterface(paramiko.SFTPServerInterface):
             _, local_path = self._resolve_local_path(path)
         except PermissionError:
             return paramiko.SFTP_PERMISSION_DENIED
-        real_path = str(local_path)
         try:
             # Create parent directories if needed
-            os.makedirs(os.path.dirname(real_path), exist_ok=True)
+            local_path.parent.mkdir(parents=True, exist_ok=True)
             
             # Determine file mode based on flags
             mode = ''
@@ -287,14 +284,13 @@ class SFTPServerInterface(paramiko.SFTPServerInterface):
                 mode = 'rb'
             
             # Try to open the file
-            if (flags & os.O_CREAT) and not os.path.exists(real_path):
+            if (flags & os.O_CREAT) and not local_path.exists():
                 # Create the file if it doesn't exist
-                f = open(real_path, 'wb')
-                f.close()
+                local_path.touch()
             
-            f = open(real_path, mode)
+            f = open(local_path, mode)
             fobj = paramiko.SFTPHandle(flags)
-            fobj.filename = real_path
+            fobj.filename = str(local_path)
             fobj.readfile = f
             fobj.writefile = f
             return fobj
@@ -309,9 +305,8 @@ class SFTPServerInterface(paramiko.SFTPServerInterface):
             _, local_path = self._resolve_local_path(path)
         except PermissionError:
             return paramiko.SFTP_PERMISSION_DENIED
-        real_path = str(local_path)
         try:
-            os.remove(real_path)
+            local_path.unlink()
             return paramiko.SFTP_OK
         except OSError:
             return paramiko.SFTP_FAILURE
@@ -323,10 +318,8 @@ class SFTPServerInterface(paramiko.SFTPServerInterface):
             _, local_new = self._resolve_local_path(newpath)
         except PermissionError:
             return paramiko.SFTP_PERMISSION_DENIED
-        real_oldpath = str(local_old)
-        real_newpath = str(local_new)
         try:
-            os.rename(real_oldpath, real_newpath)
+            local_old.rename(local_new)
             return paramiko.SFTP_OK
         except OSError:
             return paramiko.SFTP_FAILURE
@@ -337,9 +330,8 @@ class SFTPServerInterface(paramiko.SFTPServerInterface):
             _, local_path = self._resolve_local_path(path)
         except PermissionError:
             return paramiko.SFTP_PERMISSION_DENIED
-        real_path = str(local_path)
         try:
-            os.mkdir(real_path)
+            local_path.mkdir()
             return paramiko.SFTP_OK
         except OSError:
             return paramiko.SFTP_FAILURE
@@ -350,9 +342,8 @@ class SFTPServerInterface(paramiko.SFTPServerInterface):
             _, local_path = self._resolve_local_path(path)
         except PermissionError:
             return paramiko.SFTP_PERMISSION_DENIED
-        real_path = str(local_path)
         try:
-            os.rmdir(real_path)
+            local_path.rmdir()
             return paramiko.SFTP_OK
         except OSError:
             return paramiko.SFTP_FAILURE
@@ -363,16 +354,15 @@ class SFTPServerInterface(paramiko.SFTPServerInterface):
             _, local_path = self._resolve_local_path(path)
         except PermissionError:
             return paramiko.SFTP_PERMISSION_DENIED
-        real_path = str(local_path)
         try:
             if attr.st_mode is not None:
-                os.chmod(real_path, attr.st_mode)
+                os.chmod(local_path, attr.st_mode)
             if attr.st_uid is not None or attr.st_gid is not None:
                 # Windows doesn't support chown, so we skip this
                 pass
             if attr.st_atime is not None or attr.st_mtime is not None:
                 times = (attr.st_atime or 0, attr.st_mtime or 0)
-                os.utime(real_path, times)
+                os.utime(local_path, times)
             return paramiko.SFTP_OK
         except OSError:
             return paramiko.SFTP_FAILURE
