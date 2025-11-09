@@ -143,17 +143,28 @@ function formatBytes(value) {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
 }
 
+function showLoadingSkeleton(tableBody, columns = 7, rows = 3) {
+    const skeletonRows = Array.from({ length: rows }, () => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = Array.from({ length: columns }, () => 
+            '<td><div class="loading-skeleton" style="height: 20px; width: 100%;"></div></td>'
+        ).join('');
+        return tr.outerHTML;
+    }).join('');
+    tableBody.innerHTML = skeletonRows;
+}
+
 function renderUsers(users) {
     usersTableBody.innerHTML = "";
     if (!users.length) {
-        usersTableBody.innerHTML = '<tr><td colspan="7">No users found</td></tr>';
+        usersTableBody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 2rem; color: #999;">No users found</td></tr>';
         return;
     }
     for (const user of users) {
         const tr = document.createElement("tr");
         const isCurrentUser = user.username === currentUser;
         tr.innerHTML = `
-            <td>${user.username}${isCurrentUser ? ' <strong>(You)</strong>' : ''}</td>
+            <td>${user.username}${isCurrentUser ? ' <span style="color: #667eea; font-weight: 600;">(You)</span>' : ''}</td>
             <td>
                 <select data-action="change-role" data-id="${user._id}" data-current="${user.role}" ${isCurrentUser ? 'disabled' : ''}>
                     <option value="user" ${user.role === 'user' ? 'selected' : ''}>User</option>
@@ -161,7 +172,7 @@ function renderUsers(users) {
                 </select>
             </td>
             <td>${user.home_dir}</td>
-            <td>${user.is_active ? "Active" : "Inactive"}</td>
+            <td><span class="badge ${user.is_active ? 'badge-success' : 'badge-inactive'}">${user.is_active ? "Active" : "Inactive"}</span></td>
             <td>${formatDate(user.created_at)}</td>
             <td>${formatDate(user.last_login)}</td>
             <td class="actions">
@@ -179,7 +190,7 @@ function renderUsers(users) {
 function renderConnections(connections) {
     connectionsTableBody.innerHTML = "";
     if (!connections.length) {
-        connectionsTableBody.innerHTML = '<tr><td colspan="8">No connection records</td></tr>';
+        connectionsTableBody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 2rem; color: #999;">No connection records</td></tr>';
         return;
     }
     for (const conn of connections) {
@@ -193,7 +204,7 @@ function renderConnections(connections) {
             <td>${formatDate(conn.ended_at)}</td>
             <td>${formatBytes(conn.bytes_uploaded)}</td>
             <td>${formatBytes(conn.bytes_downloaded)}</td>
-            <td>${status}</td>
+            <td><span class="badge ${conn.active ? 'badge-success' : 'badge-inactive'}">${status}</span></td>
         `;
         connectionsTableBody.appendChild(tr);
     }
@@ -239,10 +250,12 @@ function renderAnalytics(summary) {
 
 async function loadUsers() {
     try {
+        showLoadingSkeleton(usersTableBody, 7, 3);
         const data = await apiFetch("/users");
         allUsers = data;
         renderUsers(data);
     } catch (error) {
+        usersTableBody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 2rem; color: #ef4444;">Error loading users</td></tr>';
         if (error instanceof ApiError && error.status === 403) {
             // Hide create user tab if not admin
             const createUserTab = document.querySelector('[data-tab="create-user"]');
@@ -279,11 +292,13 @@ function setLoading(element, isLoading) {
 
 async function loadConnections() {
     try {
+        showLoadingSkeleton(connectionsTableBody, 8, 3);
         const userId = connectionsFilter.value.trim();
         const url = userId ? `/connections?user_id=${encodeURIComponent(userId)}` : "/connections";
         const data = await apiFetch(url);
         renderConnections(data);
     } catch (error) {
+        connectionsTableBody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 2rem; color: #ef4444;">Error loading connections</td></tr>';
         showToast(error.message, "error");
     }
 }
